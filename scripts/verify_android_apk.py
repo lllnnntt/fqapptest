@@ -267,6 +267,7 @@ UNSIGNED_SIGNATURE_MARKERS = (
     "number of signers: 0",
     "not signed",
     "no signature",
+    "missing meta-inf/manifest.mf",
 )
 
 
