@@ -1,4 +1,4 @@
-//! Loopback HTTP adapter.
+//! HTTP adapter for loopback and trusted LAN access.
 //!
 //! Serves the built-in Web UI, `/src/*` decrypted manga images and the
 //! `/api/*` Web bridge to the same dispatcher the FFI bridge uses, so there is
@@ -8,13 +8,10 @@
 //! being read into memory, so serving a large media file costs a bounded
 //! buffer rather than its full size.
 //!
-//! Binding to 127.0.0.1 alone does not keep web pages out. Every request must
-//! name this listener in `Host` (defeats DNS rebinding, which would otherwise
-//! let a foreign page read responses) and, when it carries an `Origin`, come
-//! from this listener too (defeats cross-site form POSTs to the device-bound
-//! write routes, which read their arguments from the query string and so need
-//! no CORS preflight). A fresh capability protects every route from other
-//! local apps. See .agents/notes/implemented/bug-fix/2026-10-07-loopback-session.md.
+//! Requests must name this listener in `Host` and, when they carry an `Origin`,
+//! use the same host and port. This retains the host/origin checks while allowing
+//! IP-literal hosts for LAN clients. A fresh capability protects routes from
+//! unauthenticated clients; only expose this listener on trusted networks.
 
 use std::sync::Arc;
 
@@ -49,9 +46,10 @@ struct AppState {
 }
 
 pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, String> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+    // Bind all IPv4 interfaces so trusted LAN clients can connect.
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
-        .map_err(|e| format!("listen 127.0.0.1:{port}: {e}"))?;
+        .map_err(|e| format!("listen 0.0.0.0:{port}: {e}"))?;
     let local = listener
         .local_addr()
         .map_err(|e| format!("local addr: {e}"))?;
@@ -77,14 +75,22 @@ pub async fn serve(server: Arc<Server>, port: u16) -> Result<LoopbackHandle, Str
 }
 
 /// `authority` (a `Host` value or the part of an `Origin` after the scheme)
-/// names this listener. Hosts compare case-insensitively; the port must be
-/// explicit because the listener never runs on 80.
+/// must include this listener's explicit port. Accept localhost plus IP-literal
+/// hosts so clients can address the service through the device's LAN IP.
 fn is_own_authority(authority: &str, port: u16) -> bool {
     let Some((host, p)) = authority.rsplit_once(':') else {
         return false;
     };
-    p.parse::<u16>().ok() == Some(port)
-        && (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
+    if p.parse::<u16>().ok() != Some(port) {
+        return false;
+    }
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::Ipv4Addr>().is_ok()
+        || (host.starts_with('[')
+            && host.ends_with(']')
+            && host[1..host.len() - 1]
+                .parse::<std::net::Ipv6Addr>()
+                .is_ok())
 }
 
 fn is_own_origin(origin: &str, port: u16) -> bool {
